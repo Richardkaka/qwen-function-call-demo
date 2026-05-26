@@ -1,97 +1,88 @@
 # -*- coding: utf-8 -*-
 import os
-import json
 import glob
 from datetime import datetime
 from typing import List, Dict, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser, JsonOutputParser
 from pydantic import BaseModel, Field
 import docx
 from pypdf import PdfReader
-# 加载环境变量
 from dotenv import load_dotenv
 
-# ====================== 模型导入部分 ======================
-# 注释掉你不需要的模型，只保留你要用的
-# from langchain_openai import ChatOpenAI
-from langchain_community.chat_models import ChatTongyi  # 千问
-# from langchain_deepseek import ChatDeepSeek  # DeepSeek
+# ====================== 模型导入：千问云(OpenAI兼容) ======================
+from langchain_openai import ChatOpenAI
 
-# ===================== 双重API Key配置 =====================
+# ===================== 双重API密钥配置（适配千问云） ====================
+# 加载同级 .env 文件
 load_dotenv()
-# 小白直接在此填写API Key，进阶用户使用.env文件
+
+# 方式1：小白直接在此填写千问云 API Key（优先生效）
 API_KEY = ""
 
-# 双重加载：代码内填写优先 → 其次读取.env
-DASHSCOPE_API_KEY = API_KEY.strip() or os.getenv("DASHSCOPE_API_KEY", "")
+# 优先级：代码内密钥 > .env 中的 QIANWEN_API_KEY
+QIANWEN_API_KEY = API_KEY.strip() or os.getenv("QIANWEN_API_KEY", "")
 
-# 校验API Key，未配置则直接退出
-if not DASHSCOPE_API_KEY:
-    print("❌ 请配置通义千问API Key：代码内填写 或 同级目录放置.env文件")
+# 密钥校验
+if not QIANWEN_API_KEY:
+    print("❌ 错误：未配置千问云 API Key！")
+    print("👉 配置方式：")
+    print("   1. 直接在代码 API_KEY = '' 中填写密钥")
+    print("   2. 同级 .env 文件中写入：QIANWEN_API_KEY=你的密钥")
     exit(1)
 
-# 注入环境变量，供ChatTongyi模型使用
-os.environ["DASHSCOPE_API_KEY"] = DASHSCOPE_API_KEY
-# ============================================================
-
-# 问题严重程度枚举
+# ===================== 数据模型定义 ====================
 class IssueSeverity(str, Enum):
     P0_BLOCKER = "P0-阻断"
     P1_CRITICAL = "P1-严重"
     P2_NORMAL = "P2-一般"
     P3_SUGGESTION = "P3-建议"
 
-# 评审问题模型
 class ReviewIssue(BaseModel):
-    issue_id: str = Field(description="问题唯一标识，格式：角色缩写-序号")
-    severity: IssueSeverity = Field(description="问题严重程度")
-    location: str = Field(description="问题在PRD中的具体位置，如：3.2.1 登录流程")
-    description: str = Field(description="问题详细描述，客观说明哪里有问题")
-    impact: str = Field(description="如果不解决会造成什么影响")
-    suggestion: str = Field(description="具体的修改建议，可落地执行")
+    issue_id: str = Field(description="问题唯一标识")
+    severity: IssueSeverity = Field(description="严重程度")
+    location: str = Field(description="问题位置")
+    description: str = Field(description="问题描述")
+    impact: str = Field(description="问题影响")
+    suggestion: str = Field(description="修改建议")
 
-# 角色评审结果模型
 class RoleReviewResult(BaseModel):
-    role_name: str = Field(description="评审角色名称")
-    reviewer_name: str = Field(description="虚拟评审人姓名")
-    review_time: str = Field(description="评审时间")
-    overall_opinion: str = Field(description="整体评审意见，一句话总结")
-    issues: List[ReviewIssue] = Field(description="发现的问题列表")
-    pass_status: bool = Field(description="是否通过本角色评审")
+    role_name: str
+    reviewer_name: str
+    review_time: str
+    overall_opinion: str
+    issues: List[ReviewIssue]
+    pass_status: bool
 
-# 最终评审报告模型
 class FinalReviewReport(BaseModel):
-    prd_name: str = Field(description="PRD文档名称")
-    prd_version: str = Field(description="PRD版本号")
-    prd_file_path: str = Field(description="PRD本地文件路径")
-    review_date: str = Field(description="评审日期")
-    selected_roles: List[str] = Field(description="本次参与评审的角色列表")
-    total_issues: int = Field(description="发现的问题总数")
-    issues_by_severity: Dict[str, int] = Field(description="按严重程度统计的问题数量")
-    issues_by_role: Dict[str, int] = Field(description="按角色统计的问题数量")
-    role_results: List[RoleReviewResult] = Field(description="各角色评审结果")
-    final_conclusion: str = Field(description="最终评审结论")
-    next_steps: List[str] = Field(description="下一步行动建议")
+    prd_name: str
+    prd_version: str
+    prd_file_path: str
+    review_date: str
+    selected_roles: List[str]
+    total_issues: int
+    issues_by_severity: Dict[str, int]
+    issues_by_role: Dict[str, int]
+    role_results: List[RoleReviewResult]
+    final_conclusion: str
+    next_steps: List[str]
 
-# 智能角色推荐结果模型
 class RoleRecommendation(BaseModel):
-    product_type: str = Field(description="识别出的产品类型，如：微信小程序、iOS APP、Web后台系统等")
-    core_features: List[str] = Field(description="识别出的核心功能模块")
-    recommended_roles: List[str] = Field(description="推荐参与评审的角色缩写列表")
-    explanation: str = Field(description="推荐理由说明")
+    product_type: str
+    core_features: List[str]
+    recommended_roles: List[str]
+    explanation: str
 
-# 角色定义
 @dataclass
 class ReviewRole:
     name: str
     abbreviation: str
     system_prompt: str
-    is_essential: bool = True  # 是否为必须参与的角色
+    is_essential: bool = True
 
-# 评审Agent类
+# ===================== 评审核心类 ====================
 class PRDReviewAgent:
     def __init__(self, llm):
         self.llm = llm
@@ -100,7 +91,6 @@ class PRDReviewAgent:
         self.roles = self._init_roles()
         
     def _init_roles(self) -> List[ReviewRole]:
-        """初始化所有评审角色及其系统提示词"""
         return [
             ReviewRole(
                 name="产品经理",
@@ -157,7 +147,7 @@ class PRDReviewAgent:
 
 注意：你只需要指出架构层面的问题和风险，不要提出新的功能需求。
 严格按照要求的JSON格式输出评审结果，不要添加任何额外的解释或markdown格式。""",
-                is_essential=False  # 简单产品不需要架构师
+                is_essential=False
             ),
             ReviewRole(
                 name="测试工程师",
@@ -231,7 +221,7 @@ class PRDReviewAgent:
 
 注意：你只需要指出安全层面的问题和风险，不要提出新的功能需求。
 严格按照要求的JSON格式输出评审结果，不要添加任何额外的解释或markdown格式。""",
-                is_essential=False  # 简单产品不需要安全工程师
+                is_essential=False
             ),
             ReviewRole(
                 name="运维工程师",
@@ -243,7 +233,7 @@ class PRDReviewAgent:
 
 注意：你只需要指出运维层面的问题和风险，不要提出新的功能需求。
 严格按照要求的JSON格式输出评审结果，不要添加任何额外的解释或markdown格式。""",
-                is_essential=False  # 简单产品不需要运维工程师
+                is_essential=False
             ),
             ReviewRole(
                 name="数据分析师",
@@ -286,7 +276,7 @@ class PRDReviewAgent:
 
 注意：你只需要指出大数据层面的问题和风险，不要提出新的功能需求。
 严格按照要求的JSON格式输出评审结果，不要添加任何额外的解释或markdown格式。""",
-                is_essential=False  # 只有涉及大数据处理的产品才需要
+                is_essential=False
             ),
             ReviewRole(
                 name="算法工程师",
@@ -300,7 +290,7 @@ class PRDReviewAgent:
 
 注意：你只需要指出算法层面的问题和风险，不要提出新的功能需求。
 严格按照要求的JSON格式输出评审结果，不要添加任何额外的解释或markdown格式。""",
-                is_essential=False  # 只有涉及算法的产品才需要
+                is_essential=False
             ),
             ReviewRole(
                 name="法律合规专员",
@@ -330,7 +320,7 @@ class PRDReviewAgent:
 
 注意：你只需要指出可能导致微信审核不通过的问题，不要提出新的功能需求。
 严格按照要求的JSON格式输出评审结果，不要添加任何额外的解释或markdown格式。""",
-                is_essential=False  # 只有微信小程序才需要
+                is_essential=False
             ),
             ReviewRole(
                 name="应用商店审核专员",
@@ -347,50 +337,37 @@ class PRDReviewAgent:
 
 注意：你只需要指出可能导致应用商店审核不通过的问题，不要提出新的功能需求。
 严格按照要求的JSON格式输出评审结果，不要添加任何额外的解释或markdown格式。""",
-                is_essential=False  # 只有APP才需要
+                is_essential=False
             )
         ]
 
     def read_prd_file(self, file_path: str) -> str:
-        """读取本地PRD文件，支持.md/.txt/.docx/.pdf/.doc/.xls/.xlsx格式"""
+        """读取本地PRD文件，支持多格式"""
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"PRD文件不存在：{file_path}")
-        
-        file_ext = os.path.splitext(file_path)[1].lower()
-        
-        if file_ext == '.md' or file_ext == '.txt':
+        ext = os.path.splitext(file_path)[1].lower()
+
+        if ext in ['.md', '.txt']:
             with open(file_path, 'r', encoding='utf-8') as f:
                 return f.read()
-        elif file_ext == '.docx' or file_ext == '.doc':
+        elif ext in ['.docx', '.doc']:
             doc = docx.Document(file_path)
-            full_text = []
-            for para in doc.paragraphs:
-                full_text.append(para.text)
-            return '\n'.join(full_text)
-        elif file_ext == '.pdf':
+            return '\n'.join([p.text for p in doc.paragraphs])
+        elif ext == '.pdf':
             reader = PdfReader(file_path)
-            full_text = []
-            for page in reader.pages:
-                full_text.append(page.extract_text())
-            return '\n'.join(full_text)
-        # 支持Excel表格读取
-        elif file_ext in ['.xls', '.xlsx']:
+            return '\n'.join([page.extract_text() for page in reader.pages])
+        elif ext in ['.xls', '.xlsx']:
             import pandas as pd
-            df = pd.read_excel(file_path)
-            return df.to_string(index=False)
+            return pd.read_excel(file_path).to_string(index=False)
         else:
-            raise ValueError(f"不支持的文件格式：{file_ext}，仅支持.md/.txt/.docx/.pdf/.doc/.xls/.xlsx")
+            raise ValueError(f"不支持的文件格式：{ext}")
 
     def auto_select_roles(self, prd_content: str) -> RoleRecommendation:
-        """AI智能分析PRD内容，自动推荐最合适的评审角色"""
+        """AI智能分析PRD内容，自动推荐评审角色"""
         print("正在智能分析PRD内容，自动推荐评审角色...")
-        
-        # 提取PRD前3000字符进行分析（足够判断产品类型和核心功能）
         prd_summary = prd_content[:3000] + "..." if len(prd_content) > 3000 else prd_content
-        
-        # 构建角色列表说明
         roles_info = "\n".join([f"- {r.abbreviation}: {r.name}" for r in self.roles])
-        
+
         prompt = ChatPromptTemplate.from_messages([
             ("system", """你是一位有15年经验的互联网产品总监，精通各种类型产品的PRD评审流程。
 你的任务是分析PRD文档内容，识别产品类型和核心功能，然后推荐最合适的评审角色组合。
@@ -412,36 +389,26 @@ class PRDReviewAgent:
 4. 不要添加与产品无关的角色
 5. 推荐理由要具体说明为什么需要这些角色"""),
             ("human", """请分析以下PRD文档内容，推荐最合适的评审角色组合：
-
 {prd_summary}
-
-请严格按照以下JSON格式输出结果：
 {format_instructions}""")
         ])
-        
+
         chain = prompt | self.llm | self.json_parser
-        
         result = chain.invoke({
             "roles_info": roles_info,
             "prd_summary": prd_summary,
             "format_instructions": self.json_parser.get_format_instructions()
         })
-        
         return RoleRecommendation(**result)
 
     def review_by_role(self, role: ReviewRole, prd_content: str, prd_name: str, prd_version: str) -> RoleReviewResult:
-        """单个角色对PRD进行评审"""
+        """单个角色评审"""
         prompt = ChatPromptTemplate.from_messages([
             ("system", role.system_prompt),
             ("human", """请对以下PRD文档进行全面评审：
-
 PRD名称：{prd_name}
 PRD版本：{prd_version}
-
-PRD内容：
-{prd_content}
-
-请严格按照以下格式输出你的评审结果：
+PRD内容：{prd_content}
 {format_instructions}
 
 重要提醒：
@@ -450,9 +417,8 @@ PRD内容：
 - 不要添加任何解释性文字
 - 如果没有发现任何问题，issues字段返回空数组""")
         ])
-        
+
         chain = prompt | self.llm | self.parser
-        
         return chain.invoke({
             "prd_name": prd_name,
             "prd_version": prd_version,
@@ -464,83 +430,69 @@ PRD内容：
                    selected_roles: Optional[List[str]] = None,
                    use_auto_role_selection: bool = True) -> FinalReviewReport:
         """执行全角色PRD评审"""
-        # 读取本地PRD文件
         print(f"正在读取PRD文件：{prd_file_path}")
         prd_content = self.read_prd_file(prd_file_path)
         print(f"PRD文件读取成功，共{len(prd_content)}个字符")
-        
-        # 确定要参与评审的角色
+
+        # 确定评审角色
         if selected_roles:
             print(f"使用手动指定的评审角色：{', '.join(selected_roles)}")
             roles_to_review = [r for r in self.roles if r.name in selected_roles or r.abbreviation in selected_roles]
         elif use_auto_role_selection:
-            # AI自动选择角色
             role_recommendation = self.auto_select_roles(prd_content)
             print(f"\nAI智能角色推荐结果：")
             print(f"  产品类型：{role_recommendation.product_type}")
             print(f"  核心功能：{', '.join(role_recommendation.core_features)}")
             print(f"  推荐角色：{', '.join(role_recommendation.recommended_roles)}")
             print(f"  推荐理由：{role_recommendation.explanation}")
-            
             roles_to_review = [r for r in self.roles if r.abbreviation in role_recommendation.recommended_roles]
         else:
-            # 使用所有必须角色
             print("使用默认的必须评审角色")
             roles_to_review = [r for r in self.roles if r.is_essential]
-        
+
         print(f"\n开始评审，共{len(roles_to_review)}个角色参与")
         print("-" * 50)
-        
-        # 逐个角色进行评审
+
         role_results = []
         for i, role in enumerate(roles_to_review, 1):
             print(f"[{i}/{len(roles_to_review)}] 正在由 {role.name} 进行评审...")
             try:
-                result = self.review_by_role(role, prd_content, prd_name, prd_version)
-                role_results.append(result)
-                print(f"  ✅ 完成，发现{len(result.issues)}个问题")
+                res = self.review_by_role(role, prd_content, prd_name, prd_version)
+                role_results.append(res)
+                print(f"  ✅ 完成，发现{len(res.issues)}个问题")
             except Exception as e:
                 print(f"  ❌ 失败：{str(e)}")
-                # 跳过失败的角色，继续其他评审
                 continue
-        
+
         print("-" * 50)
         print("所有角色评审完成，正在生成报告...")
-        
+
         # 统计问题
         total_issues = sum(len(r.issues) for r in role_results)
-        issues_by_severity = {
-            "P0-阻断": 0,
-            "P1-严重": 0,
-            "P2-一般": 0,
-            "P3-建议": 0
-        }
+        issues_by_severity = {"P0-阻断": 0, "P1-严重": 0, "P2-一般": 0, "P3-建议": 0}
         issues_by_role = {}
-        
-        for result in role_results:
-            issues_by_role[result.role_name] = len(result.issues)
-            for issue in result.issues:
+
+        for res in role_results:
+            issues_by_role[res.role_name] = len(res.issues)
+            for issue in res.issues:
                 issues_by_severity[issue.severity] += 1
-        
-        # 生成最终结论
+
         has_p0 = issues_by_severity["P0-阻断"] > 0
-        has_p1 = issues_by_severity["P1-严重"] > 0
         p1_count = issues_by_severity["P1-严重"]
-        
+
         if has_p0:
-            final_conclusion = "评审不通过。存在P0级阻断性问题，必须全部解决后才能进入开发阶段。"
+            conclusion = "评审不通过。存在P0级阻断性问题，必须全部解决后才能进入开发阶段。"
         elif p1_count > 3:
-            final_conclusion = "评审不通过。存在多个P1级严重问题，建议修改后重新评审。"
+            conclusion = "评审不通过。存在多个P1级严重问题，建议修改后重新评审。"
         elif p1_count > 0:
-            final_conclusion = "有条件通过。存在少量P1级严重问题，需要在开发前解决并同步给所有相关人员。"
+            conclusion = "有条件通过。存在少量P1级严重问题，需要在开发前解决并同步给所有相关人员。"
         else:
-            final_conclusion = "评审通过。可以进入开发阶段，P2和P3级问题可在开发过程中逐步解决。"
-        
-        # 生成下一步行动建议
+            conclusion = "评审通过。可以进入开发阶段，P2和P3级问题可在开发过程中逐步解决。"
+
         next_steps = []
         if has_p0:
             next_steps.append("立即修复所有P0级阻断性问题")
-        if has_p1:
+        if p1_count > 0:
             next_steps.append("修复所有P1级严重问题")
         next_steps.append("根据评审意见修改PRD文档")
         next_steps.append("将修改后的PRD同步给所有相关人员")
@@ -548,7 +500,7 @@ PRD内容：
             next_steps.append("组织第二轮专项评审")
         else:
             next_steps.append("进入开发排期阶段")
-        
+
         return FinalReviewReport(
             prd_name=prd_name,
             prd_version=prd_version,
@@ -559,73 +511,66 @@ PRD内容：
             issues_by_severity=issues_by_severity,
             issues_by_role=issues_by_role,
             role_results=role_results,
-            final_conclusion=final_conclusion,
+            final_conclusion=conclusion,
             next_steps=next_steps
         )
 
     def generate_report_markdown(self, report: FinalReviewReport) -> str:
-        """生成Markdown格式的评审报告"""
+        """生成Markdown评审报告"""
         md = f"# PRD全维度评审报告\n\n"
         md += f"**PRD名称**：{report.prd_name}  \n"
         md += f"**PRD版本**：{report.prd_version}  \n"
         md += f"**PRD文件**：{report.prd_file_path}  \n"
         md += f"**评审日期**：{report.review_date}  \n"
         md += f"**参与评审角色**：{', '.join(report.selected_roles)}  \n\n"
-        
+
         md += "## 评审概览\n\n"
         md += f"**总问题数**：{report.total_issues}  \n\n"
-        
+
         md += "### 问题严重程度分布\n\n"
-        md += "| 严重程度 | 问题数量 |\n"
-        md += "|----------|----------|\n"
-        for severity, count in report.issues_by_severity.items():
-            md += f"| {severity} | {count} |\n"
+        md += "| 严重程度 | 问题数量 |\n|----------|----------|\n"
+        for k, v in report.issues_by_severity.items():
+            md += f"| {k} | {v} |\n"
         md += "\n"
-        
+
         md += "### 各角色问题统计\n\n"
-        md += "| 评审角色 | 问题数量 |\n"
-        md += "|----------|----------|\n"
-        for role, count in report.issues_by_role.items():
-            md += f"| {role} | {count} |\n"
-        md += "\n"
-        
-        md += "## 最终评审结论\n\n"
-        md += f"**{report.final_conclusion}**\n\n"
-        
+        md += "| 评审角色 | 问题数量 |\n|----------|----------|\n"
+        for k, v in report.issues_by_role.items():
+            md += f"| {k} | {v} |\n"
+        md += "\n## 最终评审结论\n\n**%s**\n\n" % report.final_conclusion
+
         md += "## 下一步行动\n\n"
-        for i, step in enumerate(report.next_steps, 1):
-            md += f"{i}. {step}\n"
-        md += "\n"
-        
-        md += "## 各角色详细评审意见\n\n"
-        for result in report.role_results:
-            md += f"### {result.role_name} ({result.reviewer_name})\n\n"
-            md += f"**整体意见**：{result.overall_opinion}  \n"
-            md += f"**评审状态**：{'✅ 通过' if result.pass_status else '❌ 不通过'}  \n"
-            md += f"**发现问题**：{len(result.issues)}个\n\n"
-            
-            if result.issues:
+        for idx, step in enumerate(report.next_steps, 1):
+            md += f"{idx}. {step}\n"
+        md += "\n## 各角色详细评审意见\n\n"
+
+        for res in report.role_results:
+            md += f"### {res.role_name}\n\n"
+            md += f"**整体意见**：{res.overall_opinion}  \n"
+            md += f"**评审状态**：{'✅ 通过' if res.pass_status else '❌ 不通过'}  \n"
+            md += f"**发现问题**：{len(res.issues)}个\n\n"
+            if res.issues:
                 md += "| 问题ID | 严重程度 | 位置 | 问题描述 | 影响 | 建议方案 |\n"
                 md += "|--------|----------|------|----------|------|----------|\n"
-                for issue in result.issues:
-                    md += f"| {issue.issue_id} | {issue.severity} | {issue.location} | {issue.description} | {issue.impact} | {issue.suggestion} |\n"
+                for item in res.issues:
+                    md += f"| {item.issue_id} | {item.severity} | {item.location} | {item.description} | {item.impact} | {item.suggestion} |\n"
             md += "\n"
-        
         return md
 
-# ====================== 主程序运行部分 ======================
+# ===================== 主程序入口 ====================
 if __name__ == "__main__":
-    # 初始化大模型
-    llm = ChatTongyi(
-        model="qwen-turbo",
-        temperature=0.1,
+    # 初始化千问云模型（OpenAI 兼容接口）
+    llm = ChatOpenAI(
+        model="qwen-turbo",       # 模型：可选 qwen-max / qwen-plus / qwen-turbo
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",  # 千问云固定接口地址
+        api_key=QIANWEN_API_KEY,
+        temperature=0.1,   # 评审场景保持低随机性
         timeout=120
     )
-    
-    # 创建评审Agent
+
     review_agent = PRDReviewAgent(llm)
-    
-    # 自动扫描当前目录所有支持的文档
+
+    # 扫描当前目录所有支持的文档
     current_dir = os.path.dirname(os.path.abspath(__file__))
     SUPPORTED_FORMATS = ["*.doc", "*.docx", "*.pdf", "*.xls", "*.xlsx", "*.md", "*.txt"]
     PRD_FILE_LIST = []
@@ -633,31 +578,31 @@ if __name__ == "__main__":
         PRD_FILE_LIST.extend(glob.glob(os.path.join(current_dir, fmt)))
 
     if not PRD_FILE_LIST:
-        print("❌ 当前目录未找到任何支持的文档：doc/docx/pdf/xls/xlsx/md/txt")
+        print("❌ 当前目录未找到任何支持的文档！")
         exit(1)
 
     print(f"✅ 找到 {len(PRD_FILE_LIST)} 个待评审文档：")
     for i, file in enumerate(PRD_FILE_LIST, 1):
         print(f" {i}. {os.path.basename(file)}")
 
-    # 循环评审所有文件
+    # 批量评审所有文档
     for idx, file_path in enumerate(PRD_FILE_LIST, 1):
         file_name = os.path.basename(file_path)
         print(f"\n===== 开始评审第 {idx} 个文档：{file_name} =====")
-        
+
         report = review_agent.full_review(
             prd_file_path=file_path,
             prd_name=file_name,
             prd_version="V1.0",
             use_auto_role_selection=True
         )
-        
-        # 生成并保存报告
-        markdown_report = review_agent.generate_report_markdown(report)
-        report_file_name = f"PRD评审报告_{file_name}_{datetime.now().strftime('%Y%m%d%H%M')}.md"
-        with open(report_file_name, "w", encoding="utf-8") as f:
-            f.write(markdown_report)
-        
-        print(f"✅ 文档 {file_name} 评审完成！报告已保存")
+
+        # 保存报告
+        md_content = review_agent.generate_report_markdown(report)
+        report_name = f"PRD评审报告_{file_name}_{datetime.now().strftime('%Y%m%d%H%M')}.md"
+        with open(report_name, "w", encoding="utf-8") as f:
+            f.write(md_content)
+
+        print(f"✅ 文档 {file_name} 评审完成！报告已保存为：{report_name}")
         print(f"共发现 {report.total_issues} 个问题")
         print(f"最终结论：{report.final_conclusion}")
